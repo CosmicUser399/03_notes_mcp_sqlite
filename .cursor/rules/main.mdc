@@ -1,0 +1,88 @@
+---
+description: Core MVP rules for the Telegram notes/reminders bot (SQLite + MCP)
+alwaysApply: true
+---
+
+# Notes Bot MVP
+
+AI Telegram-бот заметок и напоминаний. Данные в SQLite. Cursor
+читает БД через свой MCP (естественный язык, без SQL).
+
+Источник правды: `Functional_design_MVP.md` и план архитектуры.
+Не выходить за MVP (п. 19 ТЗ): нет web UI, RAG, голоса,
+Reply-клавиатуры, Google Calendar, in-progress статуса.
+
+## Стек и раскладка
+
+- Python 3.11+, aiogram v3, OpenAI SDK v1, pydantic-settings,
+  FastAPI + uvicorn, FastMCP, APScheduler, python-dateutil.
+- Два контейнера: **bot** (aiogram + scheduler) и **api**
+  (FastAPI + MCP HTTP). Общий volume SQLite. Бот **не** ходит
+  в FastAPI за данными — пишет в SQLite напрямую.
+- Пакет `app/`: `db/`, `services/`, `telegram/`, `api/`.
+
+## Код
+
+Отступы — 4 пробела. Строка кода ≤ 79; докстринги ≤ 72.
+Импорты: stdlib / сторонние / локальные, по одному, группы
+через пустую строку. Имена: snake_case, классы CapWords,
+константы UPPER_SNAKE_CASE, приватное с `_`. Type hints у
+публичных функций. Не изменяемые default-аргументы.
+Сравнения с `None` через `is` / `is not`. Без голого
+`except:`. Логирование через `logging`, не `print`.
+
+```python
+# Плохо
+except:
+    print(e)
+
+# Хорошо
+except sqlite3.Error:
+    logger.exception("sqlite write failed")
+    raise
+```
+
+## Telegram
+
+- Только свободный текст + команды `/start /note /task
+  /reminder /list_5 /list_10`. ReplyKeyboard не использовать.
+- Ответы: `parse_mode=None`, plain text. MarkdownV2 запрещён.
+  Эмодзи в тексте допустимы.
+- `/note|/task|/reminder` — FSM с forced intent. Свободный
+  текст — auto intent через OpenAI Structured Outputs.
+- Не выдумывать дату/время. Если даты нет во фразе — не
+  спрашивать; для reminder подставить `DEFAULT_REMINDER_TIME`
+  из `.env` и показать его в подтверждении.
+- Timezone пользователя из `.env` (`DEFAULT_TIMEZONE`), на
+  `/start` копировать в `users`. Команды `/timezone` нет.
+
+## Данные
+
+- Моменты времени в SQLite — UTC ISO-8601 TEXT (`...Z`).
+  Парсинг и UI — в timezone пользователя.
+- `notes.title` обязателен (LLM; fallback — первые ~80
+  символов). `reminders.task_id` NOT NULL: reminder всегда
+  создаёт/привязывает Task. `due_at` ≠ `remind_at`; snooze
+  меняет только reminder.
+- SQLite: `WAL`, `busy_timeout=5000`, `foreign_keys=ON`.
+- Статусы reminder: `pending|processing|sent|cancelled`.
+  Scheduler берёт due через CAS `pending → processing`.
+  One-shot после send → `sent`. Recurring → снова `pending`
+  и `remind_at = next()`. Stuck `processing` возвращать в
+  `pending`. Ошибка Telegram API — не ставить `sent`.
+- «Готово»: one-shot закрывает task и reminder; recurring
+  сдвигает следующее срабатывание, task не completed.
+
+## MCP
+
+Read-only. Tools: `list_tables`, `describe_table` (whitelist
+имён), `list_notes`, `search_notes` (title/text),
+`list_tasks`, `list_reminders`. Запрещены `execute_sql`,
+`query` и любые write-tools. Параметры только через
+placeholders. Тот же файл БД, что у бота.
+
+## Ошибки
+
+Пользователю — короткое сообщение на русском, без traceback.
+Пустой/нераспознанный ввод — отказ без записи в БД.
+Секреты (`.env`, токены) не логировать и не коммитить.
